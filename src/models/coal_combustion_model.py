@@ -1,4 +1,5 @@
 import numpy as np
+import scipy.optimize as opt
 
 def estimate_thermal_NO(lb_HHV, O2_mole_frac=0.05, T_flame_K=2000):
     """
@@ -19,9 +20,29 @@ def estimate_thermal_NO(lb_HHV, O2_mole_frac=0.05, T_flame_K=2000):
     lb_NO_per_lb_coal = lb_NO_per_MMBTU * (lb_HHV / 1e6)
     return lb_NO_per_lb_coal
 
+def temperature_dependent_Cp(species, T):
+    """
+    Return an approximate temperature-dependent Cp value (J/mol·K) for a given species at temperature T (K).
+    Uses simplified polynomial fits or linear models from NASA polynomials (approximated).
+    """
+    Cp_data = {
+        'CO2': lambda T: 22.26 + 5.981e-2 * T - 3.501e-5 * T**2 + 7.469e-9 * T**3,
+        'H2O': lambda T: 30.092 + 6.832e-1 * T - 6.793e-4 * T**2 + 2.534e-7 * T**3,
+        'SO2': lambda T: 24.997 + 5.914e-2 * T - 3.281e-5 * T**2 + 6.089e-9 * T**3,
+        'CO':  lambda T: 25.567 + 6.096e-2 * T - 4.055e-5 * T**2 + 9.104e-9 * T**3,
+        'O2':  lambda T: 31.322 + -2.755e-3 * T + 4.551e-6 * T**2 - 3.211e-9 * T**3,
+        'N2':  lambda T: 28.986 + 1.853e-2 * T - 9.647e-6 * T**2 + 1.312e-9 * T**3,
+        'NO':  lambda T: 30.752 + 9.630e-3 * T - 1.292e-6 * T**2 + 4.800e-10 * T**3
+    }
+    if species in Cp_data:
+        return Cp_data[species](T)
+    else:
+        return 60.0  # Default fallback value
+
 def estimate_flame_temp_Cp_method(products_mol, HHV_BTU_per_lb, T_ref_K=298.15):
     """
-    Estimate adiabatic flame temperature using constant Cp and energy balance.
+    Estimate adiabatic flame temperature using temperature-dependent Cp values.
+    Solves the energy balance: HHV = ∑ ni * ∫Cp(T)dT from T_ref to T_flame.
 
     Parameters:
         products_mol (dict): Molar amounts of combustion products.
@@ -31,20 +52,18 @@ def estimate_flame_temp_Cp_method(products_mol, HHV_BTU_per_lb, T_ref_K=298.15):
     Returns:
         float: Estimated flame temperature in Kelvin.
     """
-    #  flame temperature in the 1800–2200 K range.
-    Cp = {
-        'CO2': 75.0,  # patched from 55.3
-        'H2O': 70.0,  # patched from 51.0
-        'SO2': 65.0,  # patched from 48.0
-        'CO': 60.0,   # patched from 35.0
-        'O2': 65.0,   # patched from 38.0
-        'N2': 60.0,   # patched from 33.0
-        'NO': 60.0    # patched from 36.0
-    }
     HHV_J = HHV_BTU_per_lb * 1055.06
-    total_Cp = sum(products_mol[sp] * Cp.get(sp, 0) for sp in products_mol)
-    delta_T = HHV_J / total_Cp
-    return T_ref_K + delta_T
+
+    def energy_balance(T):
+        total_energy = 0.0
+        for sp, n in products_mol.items():
+            T_mid = (T + T_ref_K) / 2
+            Cp_avg = temperature_dependent_Cp(sp, T_mid)
+            total_energy += n * Cp_avg * (T - T_ref_K)
+        return total_energy - HHV_J
+
+    T_flame = opt.brentq(energy_balance, 1000, 4000)  # Solve between 1000–4000 K
+    return T_flame
 
 def coal_combustion_from_mass_flow(ultimate, coal_lb_per_hr, air_scfh, HHV_btu_per_lb=12900, CO2_frac=0.9, NOx_eff=0.35):
     """
